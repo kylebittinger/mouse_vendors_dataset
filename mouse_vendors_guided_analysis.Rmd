@@ -1,0 +1,166 @@
+---
+output: html_document
+---
+
+```{r message=FALSE}
+library(tidyverse)
+library(vegan)
+library(ape)
+```
+
+I'm providing a few customized functions to avoid some tricky business with 
+reading a distance matrix and running a PCoA. I know, it's cheating.
+
+```{r}
+tibble_to_distmat <- function (x) {
+  x <- as.data.frame(x)
+  rownames(x) <- x[,1]
+  x <- x[,-1]
+  as.dist(x)
+}
+custom_pcoa <- function (d) {
+  pc <- pcoa(d)
+  pcdf <- pc$vectors %>%
+    as.data.frame() %>%
+    as_tibble(rownames = "sample_id") %>%
+    select(sample_id, Axis.1, Axis.2, Axis.3, Axis.4)
+  pcdf
+}
+```
+
+This is my extreme shorthand for variable names:
+
+  * `s` is always the table of samples
+  * `cts` is always the table of read counts
+  * `uu` is always the unweighted UniFrac distance matrix
+  * `wu` is always the weighted UniFrac distance matrix
+
+```{r message=FALSE}
+s <- read_csv("mouse_vendors_samples.csv")
+cts <- read_csv("mouse_vendors_otu_table.csv")
+uu <- read_csv("mouse_vendors_unweighted_unifrac.csv") %>%
+  tibble_to_distmat()
+wu <- read_csv("mouse_vendors_weighted_unifrac.csv") %>%
+  tibble_to_distmat()
+```
+
+# Number of samples
+
+```{r}
+s %>%
+  count(sample_type, vendor)
+```
+
+```{r}
+s %>%
+  count(subject_id, sample_type) %>%
+  ggplot() +
+  geom_tile(aes(x=sample_type, y=subject_id, fill=n))
+```
+
+# Number of reads
+
+```{r}
+cts_total <- cts %>%
+  group_by(sample_id) %>%
+  summarize(total_reads = sum(counts)) %>%
+  ungroup()
+```
+
+```{r}
+cts_total %>%
+  ggplot() +
+  geom_histogram(aes(x=total_reads), binwidth = 1000, boundary = 0)
+```
+
+# Alpha diversity
+
+```{r}
+cts_alpha <- cts %>%
+  group_by(sample_id) %>%
+  summarize(richness = rarefy(counts, 5000), shannon = diversity(counts))
+```
+
+```{r}
+s_alpha <- s %>%
+  left_join(cts_alpha, by="sample_id")
+```
+
+```{r}
+s_alpha %>%
+  ggplot() +
+  geom_boxplot(aes(x=vendor, y=richness, fill=sample_type))
+```
+
+# Beta diversity
+
+```{r}
+uu_pcoa <- custom_pcoa(uu)
+uu_pcoa %>%
+  left_join(s, by="sample_id") %>%
+  ggplot() +
+  geom_point(aes(x=Axis.1, y=Axis.2, shape=sample_type, color=vendor))
+```
+
+```{r}
+set.seed(42)
+adonis(uu ~ vendor + sample_type, data=s)
+```
+
+# Differential abundance
+
+```{r}
+props <- cts %>%
+  group_by(sample_id) %>%
+  mutate(proportion = counts / sum(counts)) %>%
+  ungroup()
+```
+
+```{r}
+taxon_props <- props %>%
+  group_by(sample_id, taxon) %>%
+  summarize(counts = sum(counts), proportion = sum(proportion)) %>%
+  ungroup()
+```
+
+```{r}
+taxon_props %>%
+  group_by(taxon) %>%
+  filter(mean(proportion) > 0.01) %>%
+  ungroup() %>%
+  ggplot() +
+  geom_tile(aes(x=sample_id, y=taxon, fill = proportion)) +
+  theme(axis.text.x = element_text(angle = 90, vjust=0.5, hjust=1))
+```
+
+
+```{r}
+top_taxa <- taxon_props %>%
+  group_by(taxon) %>%
+  summarize(mean_prop = mean(proportion)) %>%
+  ungroup() %>%
+  arrange(desc(mean_prop)) %>%
+  slice(1:10)
+```
+
+```{r}
+taxon_props %>%
+  filter(taxon %in% "Bacteroidetes - S24-7") %>%
+  left_join(s, by="sample_id") %>%
+  # Add a very small number to proportions to prevent zeros
+  mutate(proportion = proportion + 1e-6) %>%
+  ggplot() +
+  geom_boxplot(aes(x=vendor, y=proportion, fill=sample_type)) +
+  scale_y_log10()
+```
+
+```{r}
+taxon_props %>%
+  filter(taxon %in% "Bacteroidetes - S24-7") %>%
+  left_join(s, by="sample_id") %>%
+  filter(sample_type %in% "Stool") %>%
+  mutate(log_prop = log10(proportion + 1e-6)) %>%
+  lm(log_prop ~ vendor, data=.) %>%
+  summary()
+```
+
